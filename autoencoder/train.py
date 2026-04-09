@@ -85,7 +85,7 @@ if __name__ == '__main__':
             tb_writer.add_scalar('train_loss/l2_loss', l2loss.item(), global_iter)
             tb_writer.add_scalar('train_loss/cos_loss', cosloss.item(), global_iter)
             tb_writer.add_scalar('train_loss/total_loss', loss.item(), global_iter)
-            tb_writer.add_histogram("feat", outputs, global_iter)
+            # tb_writer.add_histogram("feat", outputs, global_iter)  # incompatible with newer numpy
 
         if epoch > 95:
             eval_loss = 0.0

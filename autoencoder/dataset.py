@@ -16,7 +16,7 @@ class Autoencoder_dataset(Dataset):
                 data = features
             else:
                 data = np.concatenate([data, features], axis=0)
-        self.data = data
+        self.data = data.astype(np.float32)  # CLIP outputs fp16, autoencoder needs fp32
 
     def __getitem__(self, index):
         data = torch.tensor(self.data[index])

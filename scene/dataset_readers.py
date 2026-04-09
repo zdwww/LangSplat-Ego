@@ -66,14 +66,30 @@ def getNerfppNorm(cam_info):
     return {"translate": translate, "radius": radius}
 
 def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
+    # Scan which images actually exist on disk (supports subset datasets)
+    existing_files = set()
+    if os.path.exists(images_folder):
+        for fn in os.listdir(images_folder):
+            if fn.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')):
+                existing_files.add(fn)
+    print(f"\nFound {len(existing_files)} images in {images_folder}")
+    print(f"COLMAP has {len(cam_extrinsics)} camera entries")
+
     cam_infos = []
+    skipped = 0
     for idx, key in enumerate(cam_extrinsics):
+        extr = cam_extrinsics[key]
+        image_filename = os.path.basename(extr.name)
+
+        if image_filename not in existing_files:
+            skipped += 1
+            continue
+
         sys.stdout.write('\r')
-        # the exact output you're looking for:
-        sys.stdout.write("Reading camera {}/{}".format(idx+1, len(cam_extrinsics)))
+        sys.stdout.write("Loading camera {}/{} (skipped: {})".format(
+            len(cam_infos) + 1, len(existing_files), skipped))
         sys.stdout.flush()
 
-        extr = cam_extrinsics[key]
         intr = cam_intrinsics[extr.camera_id]
         height = intr.height
         width = intr.width
@@ -98,14 +114,16 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         else:
             assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
 
-        image_path = os.path.join(images_folder, os.path.basename(extr.name))
+        image_path = os.path.join(images_folder, image_filename)
         image_name = os.path.basename(image_path).split(".")[0]
 
         image = Image.open(image_path)
-     
+
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, image_path=image_path, image_name=image_name, width=width, height=height)
         cam_infos.append(cam_info)
+
     sys.stdout.write('\n')
+    print(f"Loaded {len(cam_infos)} cameras (skipped {skipped})")
     return cam_infos
 
 def fetchPly(path):
