@@ -130,24 +130,21 @@ def main():
 
             img = np.array(Image.open(os.path.join(img_dir, img_files[vi])).resize((W, H))) if vi < len(img_files) else np.zeros((H, W, 3), dtype=np.uint8)
 
-            # Normalize relevancy to [0,1] using percentile-based range for contrast
-            vlo, vhi = np.percentile(rel_map, 2), np.percentile(rel_map, 98)
-            if vhi - vlo < 1e-6:
-                vhi = vlo + 1e-6
-            rel_norm = np.clip((rel_map - vlo) / (vhi - vlo), 0, 1)
-
+            # Fixed absolute scale [0, 1] — relevancy is already a softmax probability
+            # This avoids per-frame normalization that makes frames without the object
+            # look equally "hot" as frames with the object
             fig, axes = plt.subplots(1, 4, figsize=(24, 6))
             axes[0].imshow(img); axes[0].set_title('Input'); axes[0].axis('off')
-            # Raw relevancy with adaptive range
-            im1 = axes[1].imshow(rel_map, cmap='turbo', vmin=vlo, vmax=vhi)
-            axes[1].set_title(f'"{prompt}" [{vlo:.3f}, {vhi:.3f}] max={rel_map.max():.3f}')
+            # Raw relevancy with fixed [0, 1] range
+            im1 = axes[1].imshow(rel_map, cmap='turbo', vmin=0, vmax=1)
+            axes[1].set_title(f'"{prompt}" max={rel_map.max():.3f} mean={rel_map.mean():.3f}')
             axes[1].axis('off'); plt.colorbar(im1, ax=axes[1], fraction=0.046)
-            # Percentile-normalized heatmap
-            axes[2].imshow(rel_norm, cmap='turbo', vmin=0, vmax=1)
-            axes[2].set_title(f'Normalized (2-98 pctl)'); axes[2].axis('off')
-            # Overlay: use normalized map for alpha, threshold at 0.5 for selective overlay
-            hm = cm.turbo(rel_norm)[:, :, :3]
-            alpha = np.clip((rel_norm - 0.5) * 3, 0, 0.8)  # Only highlight top ~50% of normalized range
+            # Thresholded heatmap — only show regions above 0.5 (better than chance)
+            axes[2].imshow(np.where(rel_map > 0.5, rel_map, 0), cmap='turbo', vmin=0, vmax=1)
+            axes[2].set_title(f'Thresholded (>0.5)'); axes[2].axis('off')
+            # Overlay: use raw relevancy for alpha, threshold at 0.5
+            hm = cm.turbo(rel_map)[:, :, :3]
+            alpha = np.clip((rel_map - 0.5) * 3, 0, 0.8)
             overlay = img / 255.0 * (1 - alpha[..., None]) + hm * alpha[..., None]
             axes[3].imshow(np.clip(overlay, 0, 1)); axes[3].set_title(f'Overlay (L{bl})'); axes[3].axis('off')
             plt.tight_layout()
