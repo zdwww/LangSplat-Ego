@@ -31,15 +31,16 @@ from autoencoder.model import Autoencoder
 try:
     import open_clip
 except ImportError:
-    raise ImportError("open_clip required")
+    open_clip = None  # not needed if using qwen3vl encoder
 
 
 # ---------------------------------------------------------------------------
 # Reused from eval_ego3dvqa.py
 # ---------------------------------------------------------------------------
 
-def load_autoencoder(ckpt_path):
-    model = Autoencoder([256, 128, 64, 32, 3], [16, 32, 64, 128, 256, 256, 512]).cuda()
+def load_autoencoder(ckpt_path, embed_dim=512):
+    decoder_dims = [16, 32, 64, 128, 256, 256, embed_dim]
+    model = Autoencoder([256, 128, 64, 32, 3], decoder_dims).cuda()
     model.load_state_dict(torch.load(ckpt_path))
     model.eval()
     return model
@@ -217,6 +218,14 @@ def main():
                         help="Path to moved_050/rgb/ for visualization")
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--num_vis_frames', type=int, default=10)
+    parser.add_argument('--encoder_type', type=str, default='clip',
+                        choices=['clip', 'qwen3vl'],
+                        help="Embedding model for text query encoding")
+    parser.add_argument('--qwen3vl_model', type=str,
+                        default='Qwen/Qwen3-VL-Embedding-2B',
+                        help="Qwen3-VL-Embedding model name (only used with --encoder_type qwen3vl)")
+    parser.add_argument('--embed_dim', type=int, default=512,
+                        help="Embedding dimension (Matryoshka truncation for qwen3vl)")
     args = parser.parse_args()
 
     output_dir = os.path.join(args.workspace, 'eval_novel_results')
@@ -228,21 +237,44 @@ def main():
     gaussians = load_gaussian_model(args.workspace)
 
     print("Loading autoencoder...")
-    ae = load_autoencoder(args.ae_ckpt)
+    ae = load_autoencoder(args.ae_ckpt, embed_dim=args.embed_dim)
 
-    print("Loading CLIP...")
-    clip_model, _, _ = open_clip.create_model_and_transforms(
-        'ViT-B-16', pretrained='laion2b_s34b_b88k', precision='fp16')
-    clip_model = clip_model.cuda().eval()
-    tokenizer = open_clip.get_tokenizer('ViT-B-16')
-
-    # Negative embeddings (same as eval_ego3dvqa.py)
+    # ---- Load text encoder ----
     negatives = ["object", "things", "stuff", "texture"]
-    with torch.no_grad():
-        neg_embeds = clip_model.encode_text(
-            torch.cat([tokenizer(n) for n in negatives]).cuda()
-        ).float()
-        neg_embeds = F.normalize(neg_embeds, dim=-1)
+
+    if args.encoder_type == "qwen3vl":
+        qwen_src = os.environ.get("QWEN_SRC",
+            "/home/daiwei/Ego3DVQA-GS/Qwen3-VL-Embedding/src")
+        sys.path.insert(0, qwen_src)
+        from models.qwen3_vl_embedding import Qwen3VLEmbedder
+        print(f"Loading {args.qwen3vl_model}...")
+        qwen_embedder = Qwen3VLEmbedder(
+            model_name_or_path=args.qwen3vl_model, dtype=torch.bfloat16)
+        dim = args.embed_dim
+
+        def encode_text(text):
+            emb = qwen_embedder.process([{"text": text}])
+            emb = emb[:, :dim]
+            return F.normalize(emb.float(), dim=-1)
+
+        with torch.no_grad():
+            neg_embeds = torch.cat([encode_text(n) for n in negatives], dim=0)
+    else:
+        if open_clip is None:
+            raise ImportError("open_clip required for --encoder_type clip")
+        print("Loading CLIP...")
+        clip_model, _, _ = open_clip.create_model_and_transforms(
+            'ViT-B-16', pretrained='laion2b_s34b_b88k', precision='fp16')
+        clip_model = clip_model.cuda().eval()
+        tokenizer = open_clip.get_tokenizer('ViT-B-16')
+
+        def encode_text(text):
+            with torch.no_grad():
+                e = clip_model.encode_text(tokenizer(text).cuda()).float()
+            return F.normalize(e, dim=-1)
+
+        with torch.no_grad():
+            neg_embeds = torch.cat([encode_text(n) for n in negatives], dim=0)
 
     # Rendering params
     pipe = SimpleNamespace(convert_SHs_python=False, compute_cov3D_python=False, debug=False)
@@ -274,8 +306,7 @@ def main():
     text_embeds = {}
     with torch.no_grad():
         for cat in sorted(all_categories):
-            e = clip_model.encode_text(tokenizer(cat).cuda()).float()
-            text_embeds[cat] = F.normalize(e, dim=-1)
+            text_embeds[cat] = encode_text(cat)
 
     # Select frames for visualization
     vis_indices = set(np.linspace(0, len(camera_list) - 1,
