@@ -36,6 +36,7 @@ def main():
         ('v2 tw=0.5 (CLIP LERP blend)', 'v2_sam2_tw0.5'),
         ('v4 image_only (Qwen3-VL)', 'v4_qwen3vl_image_only'),
         ('v4 multimodal (Qwen3-VL)', 'v4_qwen3vl_multimodal'),
+        ('v4 lerp tw=0.5 (Qwen3-VL)', 'v4_qwen3vl_lerp_tw0.5'),
     ]
     ds_dir = 'HDEPIC_P01'
 

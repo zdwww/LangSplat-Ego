@@ -2,9 +2,10 @@
 preprocess_qwen3vl_ego3dvqa.py — Qwen3-VL-Embedding encoding for SAM2 segments.
 
 Replaces OpenCLIP in preprocess_sam2_ego3dvqa.py with Qwen3-VL-Embedding-2B.
-Supports two encoding modes:
+Supports three encoding modes:
   - image_only: encode SAM2 crops as images
   - multimodal: encode SAM2 crops + category text together (unified embedding)
+  - lerp: LERP blend of separate image + text embeddings (like v2 but with Qwen3-VL)
 
 Outputs LangSplat-compatible _s.npy and _f.npy (512D via Matryoshka truncation).
 
@@ -176,18 +177,30 @@ def preprocess_qwen3vl(args):
                 batch_cats = categories[i:i + args.batch_size]
 
                 # Build inputs based on encode mode
-                inputs = []
-                for crop, cat in zip(batch_crops, batch_cats):
-                    if args.encode_mode == "multimodal":
-                        inputs.append({"image": crop, "text": cat})
-                    else:  # image_only
-                        inputs.append({"image": crop})
-
                 with torch.no_grad():
-                    emb = embedder.process(inputs)  # [batch, 2048]
-                    # Matryoshka truncation
-                    emb = emb[:, :args.embed_dim]
-                    emb = F.normalize(emb.float(), dim=-1)
+                    if args.encode_mode == "lerp":
+                        # Separate image + text encoding, then LERP blend
+                        img_inputs = [{"image": crop} for crop in batch_crops]
+                        img_emb = embedder.process(img_inputs)[:, :args.embed_dim]
+                        img_emb = F.normalize(img_emb.float(), dim=-1)
+
+                        txt_inputs = [{"text": cat} for cat in batch_cats]
+                        txt_emb = embedder.process(txt_inputs)[:, :args.embed_dim]
+                        txt_emb = F.normalize(txt_emb.float(), dim=-1)
+
+                        tw = args.text_weight
+                        emb = (1.0 - tw) * img_emb + tw * txt_emb
+                        emb = F.normalize(emb, dim=-1)
+                    else:
+                        inputs = []
+                        for crop, cat in zip(batch_crops, batch_cats):
+                            if args.encode_mode == "multimodal":
+                                inputs.append({"image": crop, "text": cat})
+                            else:  # image_only
+                                inputs.append({"image": crop})
+                        emb = embedder.process(inputs)[:, :args.embed_dim]
+                        emb = F.normalize(emb.float(), dim=-1)
+
                     all_features.append(emb.cpu())
 
             clip_features = torch.cat(all_features, dim=0).numpy()  # [M, embed_dim]
@@ -230,13 +243,15 @@ if __name__ == "__main__":
     parser.add_argument("--viz_dir", type=str, default=None,
                         help="Directory for input montage visualizations")
     parser.add_argument("--encode_mode", type=str, default="multimodal",
-                        choices=["image_only", "multimodal"],
-                        help="image_only: crops only; multimodal: crops + category text together")
+                        choices=["image_only", "multimodal", "lerp"],
+                        help="image_only: crops only; multimodal: crops + text unified; lerp: LERP blend of separate image + text")
     parser.add_argument("--model_name", type=str,
                         default="Qwen/Qwen3-VL-Embedding-2B",
                         help="HuggingFace model name or local path")
     parser.add_argument("--embed_dim", type=int, default=512,
                         help="Matryoshka truncation dimension (default: 512)")
+    parser.add_argument("--text_weight", type=float, default=0.5,
+                        help="LERP blend weight (0=image, 1=text). Only for --encode_mode lerp")
     parser.add_argument("--batch_size", type=int, default=4,
                         help="Segments per Qwen3-VL forward pass")
 
