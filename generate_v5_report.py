@@ -1,0 +1,140 @@
+"""Generate comparison report for LangSplat v5 (codebook) vs v2/v4 baselines.
+
+Collects eval_novel_summary.json from all configs, produces a markdown
+comparison table with per-category breakdown. HD-EPIC only.
+"""
+import os
+import json
+import argparse
+from datetime import datetime
+
+
+def load_novel_summary(workspace):
+    """Load eval_novel_summary.json from a workspace."""
+    path = os.path.join(workspace, 'eval_novel_results', 'eval_novel_summary.json')
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--ws_base', type=str, default='/mnt/raptor/daiwei/LangSplat-workspace')
+    parser.add_argument('--output', type=str, default=None)
+    args = parser.parse_args()
+
+    ws_base = args.ws_base
+    output = args.output or os.path.join(
+        '/home/daiwei/Ego3DVQA-GS/LangSplat/docs/experiments',
+        '04-10_v5-codebook-results.md')
+    os.makedirs(os.path.dirname(output), exist_ok=True)
+
+    # Define configs: (label, workspace_subdir)
+    configs = [
+        ('v2 tw=0.5 (CLIP AE)', 'v2_sam2_tw0.5'),
+        ('v4 lerp tw=0.5 (Qwen3-VL AE)', 'v4_qwen3vl_lerp_tw0.5'),
+        ('v5 CLIP codebook', 'v5_clip_codebook'),
+        ('v5 Qwen3-VL codebook', 'v5_qwen_codebook'),
+    ]
+    ds_dir = 'HDEPIC_P01'
+
+    lines = []
+    lines.append('# LangSplat v5: Codebook-Based Compression (LangSplatV2)')
+    lines.append(f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}\n')
+    lines.append('## Method')
+    lines.append('**v2/v4 baselines**: Autoencoder compression (512D → 3D → 512D)')
+    lines.append('**v5 (this experiment)**: LangSplatV2 codebook (64 basis vectors, top-k=4 sparse weights)')
+    lines.append('- v5 CLIP: CLIP LERP tw=0.5 features + codebook (same features as v2, different compression)')
+    lines.append('- v5 Qwen3-VL: Qwen3-VL LERP tw=0.5 features + codebook (same features as v4_lerp, different compression)\n')
+
+    # Collect results
+    all_results = {}
+    for config_label, config_dir in configs:
+        ws = os.path.join(ws_base, config_dir, ds_dir)
+        all_results[config_label] = load_novel_summary(ws)
+
+    # Find best AE baseline
+    ae_labels = [c[0] for c in configs[:2]]
+    best_ae = 0
+    for al in ae_labels:
+        s = all_results.get(al)
+        if s and s['metrics']['mean_iou'] > best_ae:
+            best_ae = s['metrics']['mean_iou']
+
+    # Summary table
+    lines.append('## Novel-View Segmentation Results (HD-EPIC, Mean IoU)\n')
+    lines.append('| Config | Compression | Mean IoU | Delta vs best AE |')
+    lines.append('|--------|-------------|----------|------------------|')
+
+    for config_label, _ in configs:
+        s = all_results.get(config_label)
+        if s:
+            iou = s['metrics']['mean_iou']
+            comp = 'AE (3D)' if config_label in ae_labels else 'Codebook (64)'
+            if config_label in ae_labels:
+                lines.append(f'| {config_label} | {comp} | {iou:.4f} | — |')
+            else:
+                if best_ae > 0:
+                    delta = (iou - best_ae) / best_ae * 100
+                    sign = '+' if delta >= 0 else ''
+                    lines.append(f'| {config_label} | {comp} | {iou:.4f} | {sign}{delta:.1f}% |')
+                else:
+                    lines.append(f'| {config_label} | {comp} | {iou:.4f} | N/A |')
+        else:
+            lines.append(f'| {config_label} | — | N/A | N/A |')
+
+    # Detailed metrics
+    lines.append('\n## HD-EPIC — Detailed Metrics\n')
+    lines.append('| Config | Mean IoU | Median IoU | Std IoU |')
+    lines.append('|--------|----------|------------|---------|')
+
+    for config_label, _ in configs:
+        s = all_results.get(config_label)
+        if s:
+            m = s['metrics']
+            lines.append(f'| {config_label} | {m["mean_iou"]:.4f} | '
+                         f'{m["median_iou"]:.4f} | {m["std_iou"]:.4f} |')
+        else:
+            lines.append(f'| {config_label} | N/A | N/A | N/A |')
+
+    # Per-category comparison (top 15)
+    lines.append('\n### HD-EPIC — Per-Category IoU (top 15 by frequency)\n')
+
+    ref = all_results.get('v2 tw=0.5 (CLIP AE)')
+    if ref and 'per_category' in ref['metrics']:
+        cats = ref['metrics']['per_category']
+        sorted_cats = sorted(cats.items(), key=lambda x: x[1]['count'], reverse=True)[:15]
+
+        header = '| Category | Count |'
+        sep = '|----------|-------|'
+        for cl, _ in configs:
+            short = cl.split('(')[0].strip() if '(' in cl else cl
+            header += f' {short} |'
+            sep += f' {"-"*len(short)} |'
+        lines.append(header)
+        lines.append(sep)
+
+        for cat, info in sorted_cats:
+            row = f'| {cat} | {info["count"]} |'
+            for config_label, _ in configs:
+                s = all_results.get(config_label)
+                if s and cat in s['metrics'].get('per_category', {}):
+                    ciou = s['metrics']['per_category'][cat]['mean_iou']
+                    row += f' {ciou:.4f} |'
+                else:
+                    row += ' N/A |'
+            lines.append(row)
+
+    lines.append('\n---')
+    lines.append('*Report generated by `generate_v5_report.py`*')
+
+    report = '\n'.join(lines) + '\n'
+    with open(output, 'w') as f:
+        f.write(report)
+    print(f'Report saved to {output}')
+    print(report)
+
+
+if __name__ == '__main__':
+    main()
