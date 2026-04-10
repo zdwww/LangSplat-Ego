@@ -15,7 +15,6 @@ import argparse
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 import torchvision
 from torch import nn
 from tqdm import tqdm
@@ -117,26 +116,6 @@ def save_montage(tiles, categories, save_path, tile_size=224, max_cols=8):
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     cv2.imwrite(save_path, cv2.cvtColor(montage, cv2.COLOR_RGB2BGR))
-
-
-def slerp(v0, v1, t):
-    """Spherical linear interpolation between unit vectors.
-    v0, v1: [N, D] L2-normalized tensors
-    t: [N, 1] or scalar interpolation weights in [0, 1]
-    Returns: [N, D] L2-normalized interpolated vectors
-    """
-    dot = (v0 * v1).sum(dim=-1, keepdim=True).clamp(-1.0, 1.0)
-    theta = torch.acos(dot)
-    sin_theta = torch.sin(theta).clamp(min=1e-6)
-    small = (theta.abs() < 1e-4).squeeze(-1)
-    w0 = torch.sin((1.0 - t) * theta) / sin_theta
-    w1 = torch.sin(t * theta) / sin_theta
-    result = w0 * v0 + w1 * v1
-    if small.any():
-        lerp_result = (1.0 - t) * v0 + t * v1
-        lerp_result = lerp_result / lerp_result.norm(dim=-1, keepdim=True)
-        result[small] = lerp_result[small]
-    return result / result.norm(dim=-1, keepdim=True)
 
 
 # ============================================================
@@ -243,12 +222,9 @@ def preprocess_sam2(args):
         # --- Encode with OpenCLIP ---
         if M > 0 and len(seg_tiles) > 0:
             text_weight = args.text_weight
-            blend_mode = args.blend_mode
-            need_image = blend_mode == "slerp_adaptive" or text_weight < 1.0
-            need_text = blend_mode == "slerp_adaptive" or text_weight > 0.0
 
-            # Image features
-            if need_image:
+            # Image features (skip if pure text mode)
+            if text_weight < 1.0:
                 seg_imgs = np.stack(seg_tiles, axis=0)
                 seg_tensor = torch.from_numpy(seg_imgs.astype(np.float32)).permute(0, 3, 1, 2) / 255.0
                 seg_tensor = seg_tensor.to("cuda")
@@ -262,8 +238,8 @@ def preprocess_sam2(args):
                     all_features.append(feat.detach().cpu().float())
                 image_features = torch.cat(all_features, dim=0)  # [M, 512]
 
-            # Text features
-            if need_text:
+            # Text features (only if text_weight > 0)
+            if text_weight > 0.0:
                 prefix = args.text_prompt_prefix
                 text_inputs = [prefix + cat for cat in categories]
                 text_feat = clip_model.encode_text(text_inputs)
@@ -271,28 +247,14 @@ def preprocess_sam2(args):
                 text_features = text_feat.detach().cpu().float()  # [M, 512]
 
             # Combine
-            if blend_mode == "slerp_adaptive":
-                max_tw = args.max_text_weight if args.max_text_weight is not None else text_weight
-                sim = F.cosine_similarity(image_features, text_features, dim=-1)
-                tw_per_seg = ((1.0 - sim).clamp(0, 1) * max_tw).unsqueeze(-1)  # [M, 1]
-                combined = slerp(image_features, text_features, tw_per_seg)
-                clip_features = combined.numpy()
-                tw_np = tw_per_seg.squeeze(-1).numpy()
-                if M > 1:
-                    print(f"  Adaptive tw: mean={tw_np.mean():.3f} min={tw_np.min():.3f} "
-                          f"max={tw_np.max():.3f} std={tw_np.std():.3f}")
-                else:
-                    print(f"  Adaptive tw: {tw_np.item():.3f}")
+            if text_weight <= 0.0:
+                clip_features = image_features.numpy()
+            elif text_weight >= 1.0:
+                clip_features = text_features.numpy()
             else:
-                # Original LERP (v2 backward compat)
-                if text_weight <= 0.0:
-                    clip_features = image_features.numpy()
-                elif text_weight >= 1.0:
-                    clip_features = text_features.numpy()
-                else:
-                    combined = (1.0 - text_weight) * image_features + text_weight * text_features
-                    combined = combined / combined.norm(dim=-1, keepdim=True)
-                    clip_features = combined.numpy()
+                combined = (1.0 - text_weight) * image_features + text_weight * text_features
+                combined = combined / combined.norm(dim=-1, keepdim=True)
+                clip_features = combined.numpy()
         else:
             clip_features = np.zeros((0, 512), dtype=np.float32)
 
@@ -340,11 +302,6 @@ if __name__ == "__main__":
                         help="Weight for text CLIP features (0=image only, 1=text only)")
     parser.add_argument("--text_prompt_prefix", type=str, default="",
                         help="Prefix for category names (e.g., 'a photo of a ')")
-    parser.add_argument("--blend_mode", type=str, default="lerp",
-                        choices=["lerp", "slerp_adaptive"],
-                        help="Feature blending mode: lerp (v2) or slerp_adaptive (v3)")
-    parser.add_argument("--max_text_weight", type=float, default=None,
-                        help="Max text weight for slerp_adaptive mode (default: text_weight)")
 
     args = parser.parse_args()
     torch.set_default_dtype(torch.float32)
