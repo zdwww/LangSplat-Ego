@@ -210,9 +210,12 @@ def main():
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--num_vis_frames', type=int, default=10)
     parser.add_argument('--encoder_type', type=str, default='clip',
-                        choices=['clip', 'qwen3vl'])
+                        choices=['clip', 'qwen3vl', 'precomputed'])
     parser.add_argument('--qwen3vl_model', type=str,
                         default='Qwen/Qwen3-VL-Embedding-2B')
+    parser.add_argument('--precomputed_text_embeds', type=str, default=None,
+                        help="Path to .npz file with pre-computed text embeddings "
+                             "(for --encoder_type precomputed)")
     parser.add_argument('--embed_dim', type=int, default=512)
     parser.add_argument('--topk', type=int, default=4,
                         help="Top-k for sparse codebook weights during rendering")
@@ -233,7 +236,26 @@ def main():
     # ---- Load text encoder ----
     negatives = ["object", "things", "stuff", "texture"]
 
-    if args.encoder_type == "qwen3vl":
+    if args.encoder_type == "precomputed":
+        # Load pre-computed text embeddings from .npz
+        assert args.precomputed_text_embeds, "--precomputed_text_embeds required"
+        print(f"Loading precomputed text embeddings: {args.precomputed_text_embeds}")
+        npz = np.load(args.precomputed_text_embeds, allow_pickle=True)
+        precomp_categories = list(npz['categories'])
+        precomp_cat_embeds = torch.from_numpy(npz['category_embeds']).float().cuda()
+        precomp_negatives = list(npz['negatives'])
+        precomp_neg_embeds = torch.from_numpy(npz['negative_embeds']).float().cuda()
+        assert precomp_negatives == negatives, \
+            f"Negatives mismatch: {precomp_negatives} vs {negatives}"
+        neg_embeds = F.normalize(precomp_neg_embeds, dim=-1)
+        _precomp_map = {c: precomp_cat_embeds[i:i+1] for i, c in enumerate(precomp_categories)}
+
+        def encode_text(text):
+            if text in _precomp_map:
+                return F.normalize(_precomp_map[text], dim=-1)
+            raise KeyError(f"Category '{text}' not in precomputed embeddings")
+
+    elif args.encoder_type == "qwen3vl":
         qwen_src = os.environ.get("QWEN_SRC",
             "/home/daiwei/Ego3DVQA-GS/Qwen3-VL-Embedding/src")
         sys.path.insert(0, qwen_src)

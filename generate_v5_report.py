@@ -1,6 +1,6 @@
 """Generate comparison report for LangSplat v5 (codebook) vs v2/v4 baselines.
 
-Collects eval_novel_summary.json from all configs, produces a markdown
+Collects eval_novel_summary.json from v2, v4, and v5 configs, produces a markdown
 comparison table with per-category breakdown. HD-EPIC only.
 """
 import os
@@ -40,13 +40,14 @@ def main():
     ds_dir = 'HDEPIC_P01'
 
     lines = []
-    lines.append('# LangSplat v5: Codebook-Based Compression (LangSplatV2)')
+    lines.append('# LangSplat v5: Codebook-Based Feature Compression')
     lines.append(f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}\n')
     lines.append('## Method')
-    lines.append('**v2/v4 baselines**: Autoencoder compression (512D → 3D → 512D)')
-    lines.append('**v5 (this experiment)**: LangSplatV2 codebook (64 basis vectors, top-k=4 sparse weights)')
-    lines.append('- v5 CLIP: CLIP LERP tw=0.5 features + codebook (same features as v2, different compression)')
-    lines.append('- v5 Qwen3-VL: Qwen3-VL LERP tw=0.5 features + codebook (same features as v4_lerp, different compression)\n')
+    lines.append('**v2/v4 baselines**: Autoencoder compression (512D -> 3D per Gaussian).')
+    lines.append('**v5 (this experiment)**: LangSplatV2 sparse codebook (64 basis vectors in 512D).')
+    lines.append('- Each Gaussian stores 64 logits -> softmax -> top-4 sparse weights')
+    lines.append('- Feature recovery: codebook^T @ rendered_weights -> 512D')
+    lines.append('- No autoencoder bottleneck -- features preserved in full 512D space\n')
 
     # Collect results
     all_results = {}
@@ -54,38 +55,36 @@ def main():
         ws = os.path.join(ws_base, config_dir, ds_dir)
         all_results[config_label] = load_novel_summary(ws)
 
-    # Find best AE baseline
-    ae_labels = [c[0] for c in configs[:2]]
-    best_ae = 0
-    for al in ae_labels:
-        s = all_results.get(al)
-        if s and s['metrics']['mean_iou'] > best_ae:
-            best_ae = s['metrics']['mean_iou']
+    # Find best baseline (v2)
+    v2_label = 'v2 tw=0.5 (CLIP AE)'
+    best_v2 = 0
+    s = all_results.get(v2_label)
+    if s:
+        best_v2 = s['metrics']['mean_iou']
 
     # Summary table
     lines.append('## Novel-View Segmentation Results (HD-EPIC, Mean IoU)\n')
-    lines.append('| Config | Compression | Mean IoU | Delta vs best AE |')
-    lines.append('|--------|-------------|----------|------------------|')
+    lines.append('| Config | Mean IoU | Delta vs v2 best |')
+    lines.append('|--------|----------|------------------|')
 
     for config_label, _ in configs:
         s = all_results.get(config_label)
         if s:
             iou = s['metrics']['mean_iou']
-            comp = 'AE (3D)' if config_label in ae_labels else 'Codebook (64)'
-            if config_label in ae_labels:
-                lines.append(f'| {config_label} | {comp} | {iou:.4f} | — |')
+            if config_label == v2_label:
+                lines.append(f'| {config_label} | {iou:.4f} | -- |')
             else:
-                if best_ae > 0:
-                    delta = (iou - best_ae) / best_ae * 100
+                if best_v2 > 0:
+                    delta = (iou - best_v2) / best_v2 * 100
                     sign = '+' if delta >= 0 else ''
-                    lines.append(f'| {config_label} | {comp} | {iou:.4f} | {sign}{delta:.1f}% |')
+                    lines.append(f'| {config_label} | {iou:.4f} | {sign}{delta:.1f}% |')
                 else:
-                    lines.append(f'| {config_label} | {comp} | {iou:.4f} | N/A |')
+                    lines.append(f'| {config_label} | {iou:.4f} | N/A |')
         else:
-            lines.append(f'| {config_label} | — | N/A | N/A |')
+            lines.append(f'| {config_label} | N/A | N/A |')
 
     # Detailed metrics
-    lines.append('\n## HD-EPIC — Detailed Metrics\n')
+    lines.append('\n## HD-EPIC -- Detailed Metrics\n')
     lines.append('| Config | Mean IoU | Median IoU | Std IoU |')
     lines.append('|--------|----------|------------|---------|')
 
@@ -99,9 +98,9 @@ def main():
             lines.append(f'| {config_label} | N/A | N/A | N/A |')
 
     # Per-category comparison (top 15)
-    lines.append('\n### HD-EPIC — Per-Category IoU (top 15 by frequency)\n')
+    lines.append('\n### HD-EPIC -- Per-Category IoU (top 15 by frequency)\n')
 
-    ref = all_results.get('v2 tw=0.5 (CLIP AE)')
+    ref = all_results.get(v2_label)
     if ref and 'per_category' in ref['metrics']:
         cats = ref['metrics']['per_category']
         sorted_cats = sorted(cats.items(), key=lambda x: x[1]['count'], reverse=True)[:15]

@@ -1,6 +1,6 @@
 #!/bin/bash
-# Pipeline v5: Codebook-based feature compression (LangSplatV2)
-# 2 configs: CLIP LERP + Qwen3-VL LERP, both with codebook instead of autoencoder
+# Pipeline v5: Codebook-based feature compression (LangSplatV2 sparse coding)
+# 2 configs: CLIP codebook + Qwen3-VL codebook × HD-EPIC on 2 GPUs
 # Usage: bash run_ego3dvqa_pipeline_v5.sh
 set -e
 
@@ -30,32 +30,31 @@ HDEPIC_NOVEL_MASKS=$SHARED/HDEPIC_novel_masks
 
 # GPUs
 GPUS=(6 7)
-
-# 2 configs: CLIP codebook, Qwen3-VL codebook
-LABELS=(clip_codebook qwen_codebook)
 DS_DIR=HDEPIC_P01
+
+# 2 configs
+LABELS=("v5_clip_codebook" "v5_qwen_codebook")
 
 # Workspace paths
 declare -a WS_PATHS
 for i in 0 1; do
-  WS_PATHS[$i]=$WS_BASE/v5_${LABELS[$i]}/$DS_DIR
+  WS_PATHS[$i]=$WS_BASE/${LABELS[$i]}/$DS_DIR
 done
 
 # Log directory
 LOG_DIR=$WS_BASE/v5_logs
 mkdir -p $LOG_DIR
 
-cd $LANGSPLAT
-
 echo "$(date) =========================================="
-echo "  LangSplat v5: Codebook-Based Compression"
-echo "  Config 0: CLIP LERP tw=0.5 + codebook (GPU ${GPUS[0]})"
-echo "  Config 1: Qwen3-VL LERP tw=0.5 + codebook (GPU ${GPUS[1]})"
+echo "  LangSplat v5: Codebook Feature Compression"
+echo "  Configs: CLIP codebook, Qwen3-VL codebook"
+echo "  GPUs: ${GPUS[@]}"
 echo "=========================================="
 
 # =========================================================================
 echo "$(date) === STAGE 1: Prepare Workspaces ==="
 # =========================================================================
+cd $LANGSPLAT
 for i in 0 1; do
   WS=${WS_PATHS[$i]}
   echo "  Preparing $WS..."
@@ -66,20 +65,22 @@ done
 echo "$(date) Workspaces ready"
 
 # =========================================================================
-echo "$(date) === STAGE 2: Feature Preprocessing ==="
+echo "$(date) === STAGE 2: Feature Extraction ==="
 # =========================================================================
-# Config 0: CLIP LERP (langsplat_v2 env)
-CUDA_VISIBLE_DEVICES=${GPUS[0]} $PY_LANG preprocess_sam2_ego3dvqa.py \
+
+# Config 0: CLIP LERP tw=0.5 (same features as v2 best)
+CUDA_VISIBLE_DEVICES=${GPUS[0]} $PY_LANG $LANGSPLAT/preprocess_sam2_ego3dvqa.py \
   --segments_json $HDEPIC_MASKS/segments.json \
   --images_dir ${WS_PATHS[0]}/images \
   --output_dir ${WS_PATHS[0]}/language_features \
   --viz_dir ${WS_PATHS[0]}/diagnostics \
   --text_weight 0.5 \
+  --batch_size 16 \
   2>&1 | tee $LOG_DIR/stage2_clip.log &
 PID_S2_0=$!
 
-# Config 1: Qwen3-VL LERP (qwen3vl env)
-CUDA_VISIBLE_DEVICES=${GPUS[1]} $PY_QWEN preprocess_qwen3vl_ego3dvqa.py \
+# Config 1: Qwen3-VL LERP tw=0.5
+CUDA_VISIBLE_DEVICES=${GPUS[1]} $PY_QWEN $LANGSPLAT/preprocess_qwen3vl_ego3dvqa.py \
   --segments_json $HDEPIC_MASKS/segments.json \
   --images_dir ${WS_PATHS[1]}/images \
   --output_dir ${WS_PATHS[1]}/language_features \
@@ -92,11 +93,12 @@ CUDA_VISIBLE_DEVICES=${GPUS[1]} $PY_QWEN preprocess_qwen3vl_ego3dvqa.py \
 PID_S2_1=$!
 
 wait $PID_S2_0 $PID_S2_1
-echo "$(date) Feature preprocessing complete"
+echo "$(date) Feature extraction complete"
 
 # =========================================================================
 echo "$(date) === STAGE 3: Post-process Seg Maps ==="
 # =========================================================================
+cd $LANGSPLAT
 for i in 0 1; do
   $PY_LANG postprocess_segmaps.py --workspace ${WS_PATHS[$i]} \
     2>&1 | tee $LOG_DIR/stage3_${LABELS[$i]}.log
@@ -104,7 +106,7 @@ done
 echo "$(date) Post-processing complete"
 
 # =========================================================================
-echo "$(date) === STAGE 4: SKIP (no autoencoder — codebook replaces it) ==="
+echo "$(date) === STAGE 4: SKIP (no autoencoder needed for codebook) ==="
 # =========================================================================
 
 # =========================================================================
@@ -134,7 +136,7 @@ echo "$(date) === STAGE 6: Novel-View Evaluation ==="
 # =========================================================================
 cd $LANGSPLAT
 
-# Config 0: CLIP codebook (langsplat_v2 env, CLIP text encoder)
+# Config 0: CLIP codebook — use CLIP text encoder
 CUDA_VISIBLE_DEVICES=${GPUS[0]} $PY_LANG eval_novel_views_codebook.py \
   --workspace ${WS_PATHS[0]} \
   --langsplatv2_dir $LANGSPLATV2 \
@@ -144,11 +146,11 @@ CUDA_VISIBLE_DEVICES=${GPUS[0]} $PY_LANG eval_novel_views_codebook.py \
   --moved_rgb_dir $HDEPIC_DATA/vlm-data/moved_050/rgb \
   --num_vis_frames 10 \
   --encoder_type clip \
-  --topk 4 \
+  --embed_dim 512 \
   2>&1 | tee $LOG_DIR/stage6_clip.log &
 PID_E_0=$!
 
-# Config 1: Qwen3-VL codebook (qwen3vl env, Qwen3-VL text encoder)
+# Config 1: Qwen3-VL codebook — use Qwen3-VL text encoder
 CUDA_VISIBLE_DEVICES=${GPUS[1]} $PY_QWEN $LANGSPLAT/eval_novel_views_codebook.py \
   --workspace ${WS_PATHS[1]} \
   --langsplatv2_dir $LANGSPLATV2 \
@@ -159,7 +161,6 @@ CUDA_VISIBLE_DEVICES=${GPUS[1]} $PY_QWEN $LANGSPLAT/eval_novel_views_codebook.py
   --num_vis_frames 10 \
   --encoder_type qwen3vl \
   --embed_dim 512 \
-  --topk 4 \
   2>&1 | tee $LOG_DIR/stage6_qwen.log &
 PID_E_1=$!
 
@@ -169,7 +170,8 @@ echo "$(date) Novel-view evaluation complete"
 # =========================================================================
 echo "$(date) === STAGE 7: Generate Report ==="
 # =========================================================================
-$PY_LANG $LANGSPLAT/generate_v5_report.py --ws_base $WS_BASE \
+cd $LANGSPLAT
+$PY_LANG generate_v5_report.py --ws_base $WS_BASE \
   2>&1 | tee $LOG_DIR/stage7_report.log
 
 echo ""
