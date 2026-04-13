@@ -59,6 +59,55 @@ def get_relevancy(feat_512, text_embed, neg_embeds):
     return result[:, 0, 0]
 
 
+def _pixel_ap(scores, labels):
+    """Pixel-level average precision (step-interpolated, matches sklearn to ~1e-6
+    on tie-free float scores). O(N log N) — dominated by the argsort."""
+    order = np.argsort(-scores, kind='mergesort')
+    labels = labels[order]
+    tp = np.cumsum(labels, dtype=np.int64)
+    fp = np.cumsum(~labels, dtype=np.int64)
+    n_pos = int(tp[-1])
+    if n_pos == 0:
+        return float('nan')
+    precision = tp / np.maximum(tp + fp, 1)
+    recall = tp / n_pos
+    delta_r = np.concatenate(([recall[0]], np.diff(recall)))
+    return float(np.sum(delta_r * precision))
+
+
+def _pixel_roc_auc(scores, labels):
+    """ROC-AUC via the Mann-Whitney U statistic. Exact when scores are tie-free."""
+    n_pos = int(labels.sum())
+    n_neg = int((~labels).sum())
+    if n_pos == 0 or n_neg == 0:
+        return float('nan')
+    order = np.argsort(scores, kind='mergesort')
+    ranks = np.empty_like(order, dtype=np.float64)
+    ranks[order] = np.arange(1, len(scores) + 1)
+    sum_pos_ranks = float(ranks[labels].sum())
+    return (sum_pos_ranks - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+
+
+def compute_threshold_free(rel_flat, gt_flat):
+    """Score continuous rel_map in [0,1] against binary GT without a threshold.
+    Primary metric is pixel-level AP; secondary are ROC-AUC and FG/BG saliency.
+    Returns NaN-filled dict when either class is empty (degenerate GT)."""
+    gt = gt_flat.astype(bool)
+    n_pos = int(gt.sum())
+    n_neg = int((~gt).sum())
+    if n_pos == 0 or n_neg == 0:
+        return {'ap': float('nan'), 'roc_auc': float('nan'),
+                'rel_mean_fg': float('nan'), 'rel_mean_bg': float('nan'),
+                'rel_max_fg': float('nan'), 'n_pos': n_pos, 'n_neg': n_neg}
+    ap = _pixel_ap(rel_flat, gt)
+    auc = _pixel_roc_auc(rel_flat, gt)
+    fg = rel_flat[gt]
+    bg = rel_flat[~gt]
+    return {'ap': ap, 'roc_auc': auc,
+            'rel_mean_fg': float(fg.mean()), 'rel_mean_bg': float(bg.mean()),
+            'rel_max_fg': float(fg.max()), 'n_pos': n_pos, 'n_neg': n_neg}
+
+
 # ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
@@ -219,11 +268,14 @@ def main():
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--num_vis_frames', type=int, default=10)
     parser.add_argument('--encoder_type', type=str, default='clip',
-                        choices=['clip', 'qwen3vl'],
+                        choices=['clip', 'qwen3vl', 'precomputed'],
                         help="Embedding model for text query encoding")
     parser.add_argument('--qwen3vl_model', type=str,
                         default='Qwen/Qwen3-VL-Embedding-2B',
                         help="Qwen3-VL-Embedding model name (only used with --encoder_type qwen3vl)")
+    parser.add_argument('--precomputed_text_embeds', type=str, default=None,
+                        help="Path to .npz file with pre-computed text embeddings "
+                             "(for --encoder_type precomputed)")
     parser.add_argument('--embed_dim', type=int, default=512,
                         help="Embedding dimension (Matryoshka truncation for qwen3vl)")
     args = parser.parse_args()
@@ -242,7 +294,25 @@ def main():
     # ---- Load text encoder ----
     negatives = ["object", "things", "stuff", "texture"]
 
-    if args.encoder_type == "qwen3vl":
+    if args.encoder_type == "precomputed":
+        assert args.precomputed_text_embeds, "--precomputed_text_embeds required"
+        print(f"Loading precomputed text embeddings: {args.precomputed_text_embeds}")
+        npz = np.load(args.precomputed_text_embeds, allow_pickle=True)
+        precomp_categories = list(npz['categories'])
+        precomp_cat_embeds = torch.from_numpy(npz['category_embeds']).float().cuda()
+        precomp_negatives = list(npz['negatives'])
+        precomp_neg_embeds = torch.from_numpy(npz['negative_embeds']).float().cuda()
+        assert precomp_negatives == negatives, \
+            f"Negatives mismatch: {precomp_negatives} vs {negatives}"
+        neg_embeds = F.normalize(precomp_neg_embeds, dim=-1)
+        _precomp_map = {c: precomp_cat_embeds[i:i+1] for i, c in enumerate(precomp_categories)}
+
+        def encode_text(text):
+            if text in _precomp_map:
+                return F.normalize(_precomp_map[text], dim=-1)
+            raise KeyError(f"Category '{text}' not in precomputed embeddings")
+
+    elif args.encoder_type == "qwen3vl":
         qwen_src = os.environ.get("QWEN_SRC",
             "/home/daiwei/Ego3DVQA-GS/Qwen3-VL-Embedding/src")
         sys.path.insert(0, qwen_src)
@@ -389,6 +459,7 @@ def main():
 
             # Compute metrics
             metrics = compute_iou(pred_mask, gt_mask)
+            tf = compute_threshold_free(rel_map.reshape(-1), gt_mask.reshape(-1))
 
             frame_results.append({
                 'obj_idx': obj_idx,
@@ -398,6 +469,13 @@ def main():
                 'precision': metrics['precision'],
                 'recall': metrics['recall'],
                 'f1': metrics['f1'],
+                'pred_pixels': metrics['pred_pixels'],
+                'gt_pixels': metrics['gt_pixels'],
+                'ap': tf['ap'],
+                'roc_auc': tf['roc_auc'],
+                'rel_mean_fg': tf['rel_mean_fg'],
+                'rel_mean_bg': tf['rel_mean_bg'],
+                'rel_max_fg': tf['rel_max_fg'],
                 'relevancy_max': float(rel_map.max()),
                 'relevancy_mean': float(rel_map.mean()),
             })
@@ -416,7 +494,7 @@ def main():
             all_ious.append(frame_iou)
             all_results[frame_id] = {
                 'num_objects': len(frame_results),
-                'mean_iou': float(frame_iou),
+                'mean_iou_frame': float(frame_iou),
                 'objects': frame_results,
             }
 
@@ -425,20 +503,32 @@ def main():
         torch.cuda.empty_cache()
 
     # ---- Aggregate metrics ----
-    # Per-category aggregation
-    cat_ious = {}
-    for fid, fr in all_results.items():
+    # Flatten per-object metrics across all frames (for object-level aggregation)
+    flat_ious, flat_aps, flat_aucs, flat_fg, flat_bg = [], [], [], [], []
+    for fr in all_results.values():
+        for obj in fr['objects']:
+            flat_ious.append(obj['iou'])
+            flat_aps.append(obj['ap'])
+            flat_aucs.append(obj['roc_auc'])
+            flat_fg.append(obj['rel_mean_fg'])
+            flat_bg.append(obj['rel_mean_bg'])
+
+    # Per-category aggregation (object-level)
+    cat_stats = {}
+    for fr in all_results.values():
         for obj in fr['objects']:
             cat = obj['category']
-            if cat not in cat_ious:
-                cat_ious[cat] = []
-            cat_ious[cat].append(obj['iou'])
+            if cat not in cat_stats:
+                cat_stats[cat] = {'iou': [], 'ap': []}
+            cat_stats[cat]['iou'].append(obj['iou'])
+            cat_stats[cat]['ap'].append(obj['ap'])
 
     per_category = {}
-    for cat, ious in sorted(cat_ious.items()):
+    for cat, d in sorted(cat_stats.items()):
         per_category[cat] = {
-            'mean_iou': float(np.mean(ious)),
-            'count': len(ious),
+            'mean_iou': float(np.mean(d['iou'])),
+            'mean_ap': float(np.nanmean(d['ap'])) if d['ap'] else 0.0,
+            'count': len(d['iou']),
         }
 
     summary = {
@@ -450,9 +540,18 @@ def main():
             'total_objects': sum(r['num_objects'] for r in all_results.values()),
         },
         'metrics': {
-            'mean_iou': float(np.mean(all_ious)) if all_ious else 0.0,
-            'median_iou': float(np.median(all_ious)) if all_ious else 0.0,
-            'std_iou': float(np.std(all_ious)) if all_ious else 0.0,
+            # Primary: object-level aggregation (correct)
+            'mean_iou_object': float(np.mean(flat_ious)) if flat_ious else 0.0,
+            'median_iou_object': float(np.median(flat_ious)) if flat_ious else 0.0,
+            'std_iou_object': float(np.std(flat_ious)) if flat_ious else 0.0,
+            'mean_ap': float(np.nanmean(flat_aps)) if flat_aps else 0.0,
+            'mean_roc_auc': float(np.nanmean(flat_aucs)) if flat_aucs else 0.0,
+            'mean_rel_fg': float(np.nanmean(flat_fg)) if flat_fg else 0.0,
+            'mean_rel_bg': float(np.nanmean(flat_bg)) if flat_bg else 0.0,
+            # Legacy: per-frame-mean aggregation (retained for continuity + artifact documentation)
+            'mean_iou_frame': float(np.mean(all_ious)) if all_ious else 0.0,
+            'median_iou_frame': float(np.median(all_ious)) if all_ious else 0.0,
+            'std_iou_frame': float(np.std(all_ious)) if all_ious else 0.0,
             'per_category': per_category,
         },
         'frames': all_results,
@@ -463,21 +562,24 @@ def main():
         json.dump(summary, f, indent=2)
 
     # ---- Print summary ----
+    m = summary['metrics']
     print("\n" + "=" * 70)
     print(f"Novel View Evaluation: {args.workspace}")
-    print(f"Threshold: {args.threshold}")
+    print(f"Threshold (for IoU): {args.threshold}")
     print(f"Frames: {summary['experiment']['num_frames']}, "
           f"Objects: {summary['experiment']['total_objects']}")
     print("-" * 70)
-    print(f"{'Mean IoU':<15} {'Median IoU':<15} {'Std IoU':<15}")
-    print(f"{summary['metrics']['mean_iou']:<15.4f} "
-          f"{summary['metrics']['median_iou']:<15.4f} "
-          f"{summary['metrics']['std_iou']:<15.4f}")
+    print(f"{'IoU_obj':<10} {'IoU_frm':<10} {'Median':<10} {'Std':<10} {'AP':<10} {'ROC-AUC':<10}")
+    print(f"{m['mean_iou_object']:<10.4f} {m['mean_iou_frame']:<10.4f} "
+          f"{m['median_iou_object']:<10.4f} {m['std_iou_object']:<10.4f} "
+          f"{m['mean_ap']:<10.4f} {m['mean_roc_auc']:<10.4f}")
+    print(f"Saliency gap (FG-BG): {m['mean_rel_fg'] - m['mean_rel_bg']:+.4f}  "
+          f"(FG={m['mean_rel_fg']:.4f}  BG={m['mean_rel_bg']:.4f})")
     print("-" * 70)
-    print(f"{'Category':<30} {'Mean IoU':<12} {'Count':<8}")
+    print(f"{'Category':<30} {'IoU':<10} {'AP':<10} {'Count':<8}")
     print("-" * 70)
     for cat, stats in sorted(per_category.items(), key=lambda x: -x[1]['mean_iou']):
-        print(f"{cat:<30} {stats['mean_iou']:<12.4f} {stats['count']:<8}")
+        print(f"{cat:<30} {stats['mean_iou']:<10.4f} {stats['mean_ap']:<10.4f} {stats['count']:<8}")
     print("=" * 70)
     print(f"Results saved to: {output_dir}")
 

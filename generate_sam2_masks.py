@@ -69,11 +69,18 @@ def main():
     for frame_id in tqdm(sorted(render_frames.keys()), desc="Generating SAM2 masks"):
         frame = render_frames[frame_id]
         detections = frame.get("detections", [])
-        if not detections:
-            continue
 
         # Map frame_id to original image filename
         image_name = f"camera-rgb_{frame_id}.jpg"
+
+        if not detections:
+            segments_data[frame_id] = {
+                "original_image": image_name,
+                "image_size": [],
+                "num_detections": 0,
+                "segments": [],
+            }
+            continue
         image_path = os.path.join(images_dir, image_name)
         if not os.path.exists(image_path):
             print(f"WARNING: {image_path} not found, skipping")
@@ -92,6 +99,7 @@ def main():
         segments = []
         for obj_idx, det in enumerate(detections):
             category = det.get("category", "unknown")
+            description = det.get("description", category)
             bbox = det.get("bbox_abs")
             if bbox is None:
                 print(f"WARNING: No bbox_abs for {image_name} det {obj_idx}, skipping")
@@ -119,6 +127,7 @@ def main():
             segments.append({
                 "obj_idx": obj_idx,
                 "category": category,
+                "description": description,
                 "mask_file": f"masks/{mask_filename}",
                 "bbox_abs": bbox,
                 "iou_score": best_score,

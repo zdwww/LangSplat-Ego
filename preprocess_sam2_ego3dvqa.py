@@ -181,7 +181,7 @@ def preprocess_sam2(args):
 
         for seg_info in segments:
             obj_idx = seg_info["obj_idx"]
-            category = seg_info.get("category", "unknown")
+            category = seg_info.get(args.text_field, seg_info.get("category", "unknown"))
             categories.append(category)
 
             # Load SAM2 binary mask
@@ -302,6 +302,8 @@ if __name__ == "__main__":
                         help="Weight for text CLIP features (0=image only, 1=text only)")
     parser.add_argument("--text_prompt_prefix", type=str, default="",
                         help="Prefix for category names (e.g., 'a photo of a ')")
+    parser.add_argument("--text_field", type=str, default="category",
+                        help="JSON field in segments.json to use for text encoding (default: category)")
 
     args = parser.parse_args()
     torch.set_default_dtype(torch.float32)

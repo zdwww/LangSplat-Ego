@@ -1,26 +1,30 @@
 #!/bin/bash
-# Primary pipeline: v5 CLIP CB-64 (best AP=0.3818 from unified v2-v6 analysis)
+# Pipeline v7: Detailed text descriptions experiment
 #
-# Architecture: CLIP LERP@0.5 + LangSplatV2 codebook decoder (CB-64, top-4)
-# Skips autoencoder stage — codebook replaces it.
-# Prereqs: SAM2 masks already generated in $SHARED (reused across experiments).
+# Same architecture as primary pipeline (CLIP CB-64, top-4, tw=0.5) but uses
+# vlm-captions-w-desc/ where render-branch description != category (more detailed).
+# Tests whether richer text during CLIP feature extraction improves AP.
+#
+# Differences from primary pipeline:
+#   - Captions: vlm-captions-w-desc/ (render descriptions are detailed)
+#   - SAM2 masks: generated fresh (bboxes differ from old captions)
+#   - Text field: --text_field description (uses detailed description for CLIP)
+#   - Workspace: v7_detailed_desc/
 #
 # Usage:
-#   bash run_ego3dvqa_pipeline.sh                    # full run, HDEPIC only
-#   bash run_ego3dvqa_pipeline.sh --gpu 4            # specify GPU
-#   bash run_ego3dvqa_pipeline.sh --dataset hdepic   # (default)
-#
-# To run old experiment variants, see run_ego3dvqa_pipeline_v{1..6}.sh
+#   bash run_ego3dvqa_pipeline_v7.sh                 # full run
+#   bash run_ego3dvqa_pipeline_v7.sh --gpu 4         # specify GPU
+#   bash run_ego3dvqa_pipeline_v7.sh --skip_masks    # skip SAM2 mask generation
 set -e
 
 # ── Arguments ───────────────────────────────────────────────────────────
 GPU=6
-DATASET=hdepic
+SKIP_MASKS=false
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --gpu)      GPU="$2";     shift 2;;
-    --dataset)  DATASET="$2"; shift 2;;
-    *)          echo "Unknown arg: $1"; exit 1;;
+    --gpu)         GPU="$2";      shift 2;;
+    --skip_masks)  SKIP_MASKS=true; shift;;
+    *)             echo "Unknown arg: $1"; exit 1;;
   esac
 done
 
@@ -33,50 +37,62 @@ PFX=/home/daiwei/miniconda3/envs/langsplat_v2
 export LD_LIBRARY_PATH=$PFX/lib:$LD_LIBRARY_PATH
 PY=$PFX/bin/python
 
-SHARED=$WS_BASE/v2_sam2_shared
+# SAM2 mask generation uses da3 env
+PFX_DA3=/home/daiwei/miniconda3/envs/da3
+PY_DA3=$PFX_DA3/bin/python
 
-# ── Dataset config ──────────────────────────────────────────────────────
-case $DATASET in
-  hdepic)
-    DATA_ROOT=/mnt/raptor/daiwei/Ego3DVQA-data/HD-EPIC/P01/P01-20240202-110250
-    DS_DIR=HDEPIC_P01
-    MASKS=$SHARED/HDEPIC_masks
-    NOVEL_MASKS=$SHARED/HDEPIC_novel_masks
-    ;;
-  adt)
-    DATA_ROOT=/mnt/raptor/daiwei/Ego3DVQA-data/ADT/Apartment_release_clean_seq131_M1292
-    DS_DIR=ADT_seq131
-    MASKS=$SHARED/ADT_masks
-    NOVEL_MASKS=$SHARED/ADT_novel_masks
-    ;;
-  *)
-    echo "Unknown dataset: $DATASET (use hdepic or adt)"
-    exit 1
-    ;;
-esac
+# ── Dataset config (HD-EPIC only) ──────────────────────────────────────
+DATA_ROOT=/mnt/raptor/daiwei/Ego3DVQA-data/HD-EPIC/P01/P01-20240202-110250
+DS_DIR=HDEPIC_P01
 
-CAPTIONS=$DATA_ROOT/vlm-captions/captions.json
+# v7: use new captions with detailed descriptions
+CAPTIONS=$DATA_ROOT/vlm-captions-w-desc/captions.json
 GS_CKPT=$DATA_ROOT/gs-output/chkpnt45000.pth
-WS=$WS_BASE/v5_clip_codebook/$DS_DIR
+WS=$WS_BASE/v7_detailed_desc/$DS_DIR
 
-# ── v5 CLIP CB-64 hyperparameters ──────────────────────────────────────
+# v7-specific SAM2 masks (bboxes differ from shared masks)
+MASKS=$WS_BASE/v7_detailed_desc/HDEPIC_masks
+
+# GT masks reused — moved_050 is identical between old/new captions
+NOVEL_MASKS=$WS_BASE/v2_sam2_shared/HDEPIC_novel_masks
+
+# ── v7 hyperparameters (same as v5 CLIP CB-64, except text_field) ──────
 TEXT_WEIGHT=0.5
+TEXT_FIELD=description
 CODEBOOK_SIZE=64
 TOPK=4
 ITERATIONS=10000
 RESOLUTION=2
 
 # ── Logging ─────────────────────────────────────────────────────────────
-LOG_DIR=$WS_BASE/pipeline_logs
+LOG_DIR=$WS_BASE/v7_logs
 mkdir -p $LOG_DIR
 
 echo "$(date) =========================================="
-echo "  Ego3DVQA Pipeline (v5 CLIP CB-64)"
-echo "  Dataset:  $DATASET ($DS_DIR)"
-echo "  GPU:      $GPU"
-echo "  Config:   tw=$TEXT_WEIGHT, CB-$CODEBOOK_SIZE, top-$TOPK, ${ITERATIONS} iters"
-echo "  Workspace: $WS"
+echo "  Ego3DVQA Pipeline v7: Detailed Text Descriptions"
+echo "  Dataset:    $DS_DIR"
+echo "  GPU:        $GPU"
+echo "  Captions:   vlm-captions-w-desc"
+echo "  Text field: $TEXT_FIELD (detailed descriptions for render branch)"
+echo "  Config:     tw=$TEXT_WEIGHT, CB-$CODEBOOK_SIZE, top-$TOPK, ${ITERATIONS} iters"
+echo "  Workspace:  $WS"
 echo "=========================================="
+
+# =========================================================================
+echo "$(date) === STAGE 0: Generate SAM2 Masks ==="
+# =========================================================================
+if [ "$SKIP_MASKS" = true ]; then
+  echo "  Skipping (--skip_masks). Using existing masks at $MASKS"
+else
+  cd $LANGSPLAT
+  CUDA_VISIBLE_DEVICES=$GPU $PY_DA3 generate_sam2_masks.py \
+    --captions_json $CAPTIONS \
+    --data_root $DATA_ROOT \
+    --output_dir $MASKS \
+    --device cuda \
+    2>&1 | tee $LOG_DIR/stage0_masks.log
+  echo "$(date) SAM2 mask generation complete"
+fi
 
 # =========================================================================
 echo "$(date) === STAGE 1: Prepare Workspace ==="
@@ -87,7 +103,7 @@ $PY prepare_ego3dvqa_workspace_v2.py \
   2>&1 | tee $LOG_DIR/stage1.log
 
 # =========================================================================
-echo "$(date) === STAGE 2: CLIP Feature Extraction (LERP tw=$TEXT_WEIGHT) ==="
+echo "$(date) === STAGE 2: CLIP Feature Extraction (LERP tw=$TEXT_WEIGHT, field=$TEXT_FIELD) ==="
 # =========================================================================
 CUDA_VISIBLE_DEVICES=$GPU $PY preprocess_sam2_ego3dvqa.py \
   --segments_json $MASKS/segments.json \
@@ -95,6 +111,7 @@ CUDA_VISIBLE_DEVICES=$GPU $PY preprocess_sam2_ego3dvqa.py \
   --output_dir $WS/language_features \
   --viz_dir $WS/diagnostics \
   --text_weight $TEXT_WEIGHT \
+  --text_field $TEXT_FIELD \
   --batch_size 16 \
   2>&1 | tee $LOG_DIR/stage2.log
 echo "$(date) Feature extraction complete"
@@ -147,8 +164,8 @@ echo "$(date) Novel-view evaluation complete"
 # =========================================================================
 echo ""
 echo "$(date) =========================================="
-echo "  PIPELINE COMPLETE"
-echo "  Workspace: $WS"
+echo "  V7 PIPELINE COMPLETE"
+echo "  Workspace:    $WS"
 echo "  Eval results: $WS/eval_results/"
-echo "  Logs: $LOG_DIR/"
+echo "  Logs:         $LOG_DIR/"
 echo "=========================================="

@@ -12,9 +12,18 @@ import time
 
 import torch
 import math
+import inspect
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
+
+# Detect which diff_gaussian_rasterization is installed in this env. The
+# efficient-langsplat variant (used by LangSplatV2, installed for v5/v6) adds
+# `quick_render` to GaussianRasterizationSettings; the original LangSplat build
+# doesn't have it. We pass it only when present to keep this renderer working
+# in both envs.
+_GRS_PARAMS = set(inspect.signature(GaussianRasterizationSettings).parameters.keys())
+_HAS_QUICK_RENDER = 'quick_render' in _GRS_PARAMS
 
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, opt, scaling_modifier = 1.0, override_color = None):
     """
@@ -34,7 +43,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
 
-    raster_settings = GaussianRasterizationSettings(
+    _grs_kwargs = dict(
         image_height=int(viewpoint_camera.image_height),
         image_width=int(viewpoint_camera.image_width),
         tanfovx=tanfovx,
@@ -49,6 +58,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         debug=pipe.debug,
         include_feature=opt.include_feature,
     )
+    if _HAS_QUICK_RENDER:
+        _grs_kwargs['quick_render'] = False
+    raster_settings = GaussianRasterizationSettings(**_grs_kwargs)
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
