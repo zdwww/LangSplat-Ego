@@ -1,230 +1,188 @@
-# [CVPR2024 Highlight] LangSplat: 3D Language Gaussian Splatting 
-[Minghan Qin*](https://minghanqin.github.io/), [Wanhua Li*†](https://li-wanhua.github.io/), [Jiawei Zhou*](https://latitudezhou.github.io/), [Haoqian Wang†](https://www.sigs.tsinghua.edu.cn/whq_en/main.htm), [Hanspeter Pfister](https://seas.harvard.edu/person/hanspeter-pfister)<br>(\* indicates equal contribution, † means Co-corresponding author)<br>| [Webpage](https://langsplat.github.io/) | [Full Paper](https://arxiv.org/pdf/2312.16084.pdf) | [Video](https://www.youtube.com/watch?v=XMlyjsei-Es) |<br>
-| Preprocessed Dataset | [BaiduWangpan](https://pan.baidu.com/s/1S_cdmN9EFOlCQ3z1GZR3EA?pwd=lfea) | [GoogleDrive](https://drive.google.com/drive/folders/1Icw5AcQkY_2L_k7ddXrGCJ3z4laa4jg5?usp=sharing) |<br>
-| Pre-trained Models | [BaiduWangpan](https://pan.baidu.com/s/12L83uEi5KlF9ViAZqp0B4w?pwd=dl22) | [GoogleDrive](https://drive.google.com/drive/folders/1ASFXWOwaXP_aSXV2iMDmEfILaDXQXlrE?usp=sharing) |<br>
-| [Datasets](https://drive.google.com/file/d/1QF1Po5p5DwTjFHu6tnTeYs_G0egMVmHt/view?usp=sharing) |<br>
+# LangSplat for Ego3DVQA
 
-![Teaser image](assets/teaser.png)
+Fork of [LangSplat](https://github.com/minghanqin/LangSplat) (CVPR 2024) adapted for egocentric 3D visual question answering on the **Ego3DVQA** benchmark. Uses [LangSplatV2](https://langsplat-v2.github.io/) codebook-based feature compression instead of the original autoencoder.
 
-This repository contains the official authors implementation associated with the paper "LangSplat: 3D Language Gaussian Splatting" (CVPR 2024), which can be found [here](https://arxiv.org/pdf/2312.16084.pdf). We further provide the preprocessed datasets 3D-OVS with language feature, as well as pre-trained models. 
+**Best configuration (v5 CLIP CB-64):** CLIP LERP@0.5 text blending + 64-entry codebook, achieving AP=0.3818 on HD-EPIC novel-view segmentation.
 
-<section class="section" id="BibTeX">
-  <div class="container is-max-desktop content">
-    <h2 class="title">😊LangSplat Family</h2>
-    <pre><code>@inproceedings{qin2024langsplat,
-  title={Langsplat: 3d language gaussian splatting},
-  author={Qin, Minghan and Li, Wanhua and Zhou, Jiawei and Wang, Haoqian and Pfister, Hanspeter},
-  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
-  pages={20051--20060},
-  year={2024}
-}</code></pre>
+## Pipeline Overview
 
-  <p><strong>🎉 We have released LangSplat V2!</strong>  
-  The new version significantly improves performance, achieving over <strong>450+ FPS</strong> in rendering.  <a href="https://langsplat-v2.github.io/" target="_blank" style="text-decoration: underline;">[NeurIPS 2025] LangSplat V2</a>
-  </p>
+The main pipeline (`run_ego3dvqa_pipeline.sh`) runs 6 stages:
 
-  <pre><code>@article{li2025langsplatv2,
-  title={LangSplatV2: High-dimensional 3D Language Gaussian Splatting with 450+ FPS},
-  author={Li, Wanhua and Zhao, Yujie and Qin, Minghan and Liu, Yang and Cai, Yuanhao and Gan, Chuang and Pfister, Hanspeter},
-  journal={arXiv preprint arXiv:2507.07136},
-  year={2025}
-}</code></pre>
+| Stage | Script | Description |
+|-------|--------|-------------|
+| 1 | `prepare_ego3dvqa_workspace_v2.py` | Symlinks images, COLMAP data, and masks into a workspace directory |
+| 2 | `preprocess_sam2_ego3dvqa.py` | CLIP-encodes SAM2-segmented crops, blends image+text features (LERP tw=0.5) |
+| 3 | `postprocess_segmaps.py` | Masks out dynamic objects and hands from segmentation maps |
+| 4 | *(skipped)* | Autoencoder replaced by codebook |
+| 5 | LangSplatV2 `train.py` | Trains 3D Gaussian splatting with codebook feature compression (CB-64, top-4) |
+| 6 | `eval_novel_views_codebook.py` | Evaluates on novel views: IoU, AP, ROC-AUC, FG-BG saliency gap |
 
-  <p>🎉We also invite everyone to check out our <a href="https://4d-langsplat.github.io/" target="_blank" style="text-decoration: underline;">[CVPR 2025] 4D LangSplat</a>, which is a multimodal, object-wise video prompting approach combined with a status deformable network to learn 4D language fields.
-  </p> 
+### Prerequisites (one-time setup)
 
-  <pre><code>@inproceedings{li20254d,
-  title={4d langsplat: 4d language gaussian splatting via multimodal large language models},
-  author={Li, Wanhua and Zhou, Renping and Zhou, Jiawei and Song, Yingwei and Herter, Johannes and Qin, Minghan and Huang, Gao and Pfister, Hanspeter},
-  booktitle={Proceedings of the Computer Vision and Pattern Recognition Conference},
-  pages={22001--22011},
-  year={2025}
-}</code></pre>
-  
-  </div> 
-</section>
+These scripts prepare the data that the pipeline consumes. They are NOT called by the pipeline itself.
 
-  
-  </div>
-</section>
+| Script | Conda Env | Description |
+|--------|-----------|-------------|
+| `generate_sam2_masks.py` | `da3` | Generates SAM2 masks from VLM caption bounding boxes |
+| `generate_novel_gt_masks.py` | `da3` | Generates ground-truth SAM2 masks for novel-view evaluation |
 
-## Cloning the Repository
+## Quick Start
 
-The repository contains submodules, thus please check it out with 
-```shell
-# SSH
-git clone git@github.com:minghanqin/LangSplat.git --recursive
-```
-or
-```shell
-# HTTPS
-git clone https://github.com/minghanqin/LangSplat.git --recursive
+```bash
+# Run the full pipeline on HD-EPIC (default)
+bash run_ego3dvqa_pipeline.sh
+
+# Specify GPU
+bash run_ego3dvqa_pipeline.sh --gpu 4
+
+# Run on ADT dataset
+bash run_ego3dvqa_pipeline.sh --dataset adt
 ```
 
-## Overview
-
-The codebase has 3 main components:
-- A PyTorch-based optimizer to produce a LangSplat model from SfM datasets with language feature inputs to
-- A scene-wise language autoencode to alleviate substantial memory demands imposed by explicit modeling.
-- A script to help you turn your own images into optimization-ready SfM data sets with language feature
-
-The components have been tested on Ubuntu Linux 18.04. Instructions for setting up and running each of them are found in the sections below.
-
-## Datasets
-In the experiments section of our paper, we primarily utilized two datasets: the 3D-OVS dataset and the LERF dataset.
-
-The 3D-OVS dataset is accessible for download via the following link: [Download 3D-OVS Dataset](https://drive.google.com/drive/folders/1kdV14Gu5nZX6WOPbccG7t7obP_aXkOuC?usp=sharing) .
-
-For the LERF dataset, we have expanded upon its existing collection and also provided the corresponding COLMAP data. These resources can be accessed through this link: [Download Expanded LERF Dataset and COLMAP Data](https://drive.google.com/file/d/1QF1Po5p5DwTjFHu6tnTeYs_G0egMVmHt/view?usp=sharing).
-
-## Optimizer
-
-The optimizer uses PyTorch and CUDA extensions in a Python environment to produce trained models. 
-
-### Hardware Requirements
-
-- CUDA-ready GPU with Compute Capability 7.0+
-- 24 GB VRAM (to train to paper evaluation quality)
-
-### Software Requirements
-- Conda (recommended for easy setup)
-- C++ Compiler for PyTorch extensions (we used VS Code)
-- CUDA SDK 11 for PyTorch extensions (we used 11.8)
-- C++ Compiler and CUDA SDK must be compatible
-
-### Setup
-
-#### Environment Setup
-
-Our default, provided install method is based on Conda package and environment management:
-```shell
-conda env create --file environment.yml
-conda activate langsplat
-```
-
-### QuickStart
-
-Download the pretrained model to ```output/```, then simply use
-
-```shell
-python render.py -m output/$CASENAME --include_feature
-```
-
-
-## Processing your own Scenes
-
-### Before getting started
-Firstly, put your images into the data dir.
-```
-<dataset_name>
-|---input
-|   |---<image 0>
-|   |---<image 1>
-|   |---...
-```
-Secondly, you need to acquire the following dataset format and a pre-trained RGB model follow the [3dgs](https://github.com/graphdeco-inria/gaussian-splatting) repository.
+## Directory Structure
 
 ```
-<dataset_name>
-|---images
-|   |---<image 0>
-|   |---<image 1>
-|   |---...
-|---input
-|   |---<image 0>
-|   |---<image 1>
-|   |---...
-|---output
-|   |---<dataset_name>
-|   |   |---point_cloud/iteration_30000/point_cloud.ply
-|   |   |---cameras.json
-|   |   |---cfg_args
-|   |   |---chkpnt30000.pth
-|   |   |---input.ply
-|---sparse
-    |---0
-        |---cameras.bin
-        |---images.bin
-        |---points3D.bin
+.
+├── run_ego3dvqa_pipeline.sh       # Main pipeline entry point
+├── prepare_ego3dvqa_workspace_v2.py  # Stage 1: workspace setup
+├── preprocess_sam2_ego3dvqa.py       # Stage 2: CLIP feature extraction
+├── postprocess_segmaps.py            # Stage 3: segmap post-processing
+├── eval_novel_views_codebook.py      # Stage 6: novel-view evaluation
+├── generate_sam2_masks.py            # Prerequisite: SAM2 mask generation
+├── generate_novel_gt_masks.py        # Prerequisite: GT mask generation
+├── rebuild_rasterizer_64ch.sh        # Tool: switch rasterizer between 64/128 channels
+│
+├── gaussian_renderer/     # LangSplat rendering (used by old eval; codebook eval uses LangSplatV2)
+├── scene/                 # Camera, dataset readers, Gaussian model
+├── arguments/             # Argument parsing
+├── utils/                 # Utility functions
+├── autoencoder/           # Original LangSplat autoencoder (replaced by codebook)
+├── eval/                  # Original LangSplat evaluation
+├── lpipsPyTorch/          # LPIPS perceptual loss
+├── submodules/            # Git submodules (rasterization, SAM, simple-knn)
+├── docs/                  # Experiment reports and analysis
+├── archive/               # Previous experiment scripts (v1-v7, reports, analysis)
+└── assets/                # Images
 ```
 
+## Input Data
 
-### Environment setup.
-  Please install [segment-anything-langsplat](https://github.com/minghanqin/segment-anything-langsplat) and download the checkpoints of SAM from [here](https://github.com/facebookresearch/segment-anything) to ```ckpts/```.
-### Pipeline
-Follow the ```process.sh``` and train LangSplat on your own scenes.
-- **Step 1: Generate Language Feature of the Scenes.**
-  Put the image data into the "input" directory under the ```<dataset_name>/```, then run the following code.
-  ```
-  python preprocess.py --dataset_path $dataset_path 
-  ```
-- **Step 2: Train the Autoencoder and get the lower-dims Feature.**
-  ```
-  # train the autoencoder
-  cd autoencoder
-  python train.py --dataset_name $dataset_path --encoder_dims 256 128 64 32 3 --decoder_dims 16 32 64 128 256 256 512 --lr 0.0007 --output ae_ckpt
-  # get the 3-dims language feature of the scene
-  python test.py --dataset_name $dataset_path --output
-  ```
+The pipeline expects data organized under a dataset root. Example for HD-EPIC:
 
-  Our model expect the following dataset structure in the source path location:
-  ```
-  <dataset_name>
-  |---images
-  |   |---<image 0>
-  |   |---<image 1>
-  |   |---...
-  |---language_feature
-  |   |---00_f.npy
-  |   |---00_s.npy
-  |   |---...
-  |---language_feature_dim3
-  |   |---00_f.npy
-  |   |---00_s.npy
-  |   |---...
-  |---output
-  |   |---<dataset_name>
-  |   |   |---point_cloud/iteration_30000/point_cloud.ply
-  |   |   |---cameras.json
-  |   |   |---cfg_args
-  |   |   |---chkpnt30000.pth
-  |   |   |---input.ply
-  |---sparse
-      |---0
-          |---cameras.bin
-          |---images.bin
-          |---points3D.bin
-  ```
-- **Step 3: Train the LangSplat.**
-  ```
-  python train.py -s dataset_path -m output/${casename} --start_checkpoint $dataset_path/output/$casename/chkpnt30000.pth --feature_level ${level}
-  ```
-- **Step 4: Render the LangSplat.**
-  ```
-  python render.py -s dataset_path -m output/${casename} --feature_level ${level}
-  ```
-- **Step 5: Eval.**
-  First, we generate the 3-dim language feature map through Step 4. Subsequently, the decoder elevates the features from 3 dimensions to 512 dimensions. For further operations and detailed explanations, please refer to the [supplementary materials](https://arxiv.org/pdf/2312.16084.pdf). 
+```
+/mnt/raptor/daiwei/Ego3DVQA-data/HD-EPIC/P01/P01-20240202-110250/
+├── images/                        # Full-resolution RGB images (camera-rgb_*.jpg)
+├── sparse/0/                      # COLMAP reconstruction (cameras.bin, images.bin, points3D.bin)
+├── gs-output/chkpnt45000.pth      # Pre-trained RGB Gaussian splatting checkpoint
+├── vlm-captions/captions.json     # VLM-generated captions with bounding boxes
+└── vlm-data/moved_050/            # Novel-view evaluation data
+    ├── metadata.json              #   Frame metadata and object annotations
+    └── rgb/                       #   Novel-view RGB images
+```
 
-  -  3D Object Localization on LERF and 3D Semantic Segmentation on LERF. Our eval code is based on [LERF](https://github.com/kerrj/lerf) and [NerfStudio](https://github.com/nerfstudio-project/nerfstudio), thanks for these impressive open-source projects!
-  
-      - Please download the [lerf_ovs]((https://drive.google.com/file/d/1QF1Po5p5DwTjFHu6tnTeYs_G0egMVmHt/view?usp=sharing)) first. 
-      
-      - Set the ```gt_folder``` as the path to lerf_ovs/label. 
-      
-      - Make sure finish the **Step 4** before you run the eval code. 
-  ```
-  cd eval
-  sh eval.sh
-  ```
+### Pre-computed shared data
 
-## TODO list:
-- [x] release the code of the optimizer
-- [x] release the code of the autoencoder
-- [x] release the code of the segment-anything-langsplat
-- [x] update the arxiv link
-- [x] release the preprocessed dataset and the pretrained model
-- [x] release more preprocessed dataset and the pretrained model (coming soon)
-- [x] release the code of the eval
+SAM2 masks and GT masks are pre-computed and shared across experiments:
 
-This project is still under development. Please feel free to raise issues or submit pull requests to contribute to our codebase.
+```
+/mnt/raptor/daiwei/LangSplat-workspace/v2_sam2_shared/
+├── HDEPIC_masks/           # SAM2 masks for training frames
+│   ├── masks/              #   Binary mask PNGs per object
+│   └── segments.json       #   Metadata (categories, bboxes, IoU scores)
+├── HDEPIC_novel_masks/     # GT masks for novel-view evaluation
+├── ADT_masks/              # SAM2 masks for ADT dataset
+└── ADT_novel_masks/        # GT masks for ADT novel views
+```
+
+## Output
+
+The pipeline writes all outputs to a workspace directory:
+
+```
+/mnt/raptor/daiwei/LangSplat-workspace/v5_clip_codebook/HDEPIC_P01/
+├── images/                        # Symlinked training images
+├── sparse/                        # Symlinked COLMAP data
+├── language_features/             # CLIP features (_f.npy) and segmaps (_s.npy) per frame
+├── diagnostics/                   # CLIP input montage visualizations
+├── output/                        # Trained model
+│   └── output_1/
+│       ├── point_cloud/           # Final Gaussian point cloud
+│       ├── chkpnt10000.pth        # Training checkpoint
+│       └── cfg_args               # Training configuration
+└── eval_results/                  # Evaluation output
+    ├── results.json               # Per-object and aggregate metrics (IoU, AP, ROC-AUC)
+    └── vis/                       # Side-by-side visualizations
+```
+
+Pipeline logs are written to `/mnt/raptor/daiwei/LangSplat-workspace/pipeline_logs/`.
+
+## Configuration
+
+Key hyperparameters (set in `run_ego3dvqa_pipeline.sh`):
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `TEXT_WEIGHT` | 0.5 | LERP blend: `feat = normalize(0.5*image + 0.5*text)` |
+| `CODEBOOK_SIZE` | 64 | Number of codebook entries in LangSplatV2 |
+| `TOPK` | 4 | Top-k codebook entries per Gaussian |
+| `ITERATIONS` | 10000 | Training iterations |
+| `RESOLUTION` | 2 | Half-resolution training (full-res OOMs on 24GB GPUs) |
+
+## Environment
+
+The pipeline uses the `langsplat_v2` conda environment:
+
+```
+conda env: langsplat_v2
+python:    /home/daiwei/miniconda3/envs/langsplat_v2/bin/python
+```
+
+Prerequisite mask generation (SAM2) uses the `da3` environment:
+
+```
+conda env: da3
+python:    /home/daiwei/miniconda3/envs/da3/bin/python
+```
+
+### Rasterizer
+
+The pipeline depends on `diff_gaussian_rasterization` from LangSplatV2's custom CUDA rasterizer at:
+
+```
+/home/daiwei/LangSplat-variants/LangSplatV2/submodules/efficient-langsplat-rasterization/
+```
+
+The rasterizer's `NUM_CHANNELS_language_feature` in `config.h` must match the codebook size (64 for the main pipeline). Use the maintenance tool to check or switch:
+
+```bash
+bash rebuild_rasterizer_64ch.sh status         # Check current config
+bash rebuild_rasterizer_64ch.sh rebuild_to_64  # Switch to 64 channels
+bash rebuild_rasterizer_64ch.sh restore_to_128 # Switch to 128 channels
+```
+
+After switching, reinstall to site-packages:
+```bash
+cd /home/daiwei/LangSplat-variants/LangSplatV2/submodules/efficient-langsplat-rasterization/
+pip install .
+```
+
+## Experiment History
+
+Previous experiments are archived in `archive/`. The v2-v6 unified analysis is documented in `docs/experiments/04-11_unified-v2-v6-analysis.md`.
+
+| Version | Architecture | AP | Notes |
+|---------|-------------|-----|-------|
+| v1 | SAM1 + autoencoder (3 feature levels) | 0.0975 | Original LangSplat pipeline |
+| v2 | SAM2 + CLIP image-only | 0.2684 | Baseline with SAM2 masks |
+| v2-lerp | SAM2 + CLIP LERP@0.5 + autoencoder | 0.3302 | Text blending helps |
+| v3 | SLERP + adaptive text weights | 0.2779 | Over-engineering hurt |
+| v4 | Qwen3-VL embeddings | 0.0524 | Qwen3-VL embeddings incompatible |
+| **v5** | **CLIP LERP@0.5 + CB-64** | **0.3818** | **Best -- main pipeline** |
+| v6 | CLIP LERP@0.5 + CB-128 | 0.3680 | Larger codebook slightly worse |
+| v7 | CLIP detailed descriptions + CB-64 | 0.3437 | Richer text hurt (train-test asymmetry) |
+
+## References
+
+- [LangSplat](https://github.com/minghanqin/LangSplat) (CVPR 2024) -- Qin et al.
+- [LangSplatV2](https://langsplat-v2.github.io/) (NeurIPS 2025) -- Li et al.
+- [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) -- Kerbl et al.
